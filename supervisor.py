@@ -7,7 +7,8 @@ from config import MAX_TOOL_ROUNDS
 from model import ollama_request
 from policy import tool_risk
 from tools import (
-    disk_usage, list_directory, list_processes, open_app, read_file, restart_service,
+    apply_file_edit, disk_usage, list_directory, list_processes, open_app, preview_file_edit,
+    read_file, restart_service,
     run_command, service_logs, service_status, start_service, stop_service, system_info,
 )
 
@@ -15,6 +16,7 @@ from tools import (
 TOOL_FUNCTIONS = {
     "system_info": system_info, "list_processes": list_processes,
     "disk_usage": disk_usage, "list_directory": list_directory, "read_file": read_file,
+    "preview_file_edit": preview_file_edit, "apply_file_edit": apply_file_edit,
     "run_command": run_command, "open_app": open_app, "service_status": service_status,
     "service_logs": service_logs, "start_service": start_service,
     "stop_service": stop_service, "restart_service": restart_service,
@@ -35,6 +37,8 @@ TOOLS = [
     _tool("disk_usage", "Show filesystem disk usage for a path.", {"path": {"type": "string", "description": "Filesystem path. Defaults to /."}}),
     _tool("list_directory", "List files and directories at a given path.", {"path": {"type": "string", "description": "Directory path. Defaults to the current directory."}}),
     _tool("read_file", "Read a text file. Files larger than 256 KiB are rejected.", {"path": {"type": "string", "description": "Path to the text file."}}, ["path"]),
+    _tool("preview_file_edit", "Preview a text file change without modifying the file. Use this before apply_file_edit.", {"path": {"type": "string", "description": "Path under the home directory or /tmp."}, "content": {"type": "string", "description": "Complete replacement text."}}, ["path", "content"]),
+    _tool("apply_file_edit", "Apply a confirmed text file change after preview_file_edit.", {"path": {"type": "string", "description": "Path under the home directory or /tmp."}, "content": {"type": "string", "description": "Complete replacement text."}, "expected_sha256": {"type": "string", "description": "sha256 from the preview, when the file existed."}}, ["path", "content"]),
     _tool("run_command", "Run a non-root Linux command. Dangerous commands and shell composition are blocked.", {"command": {"type": "string", "description": "A single Linux command without shell pipes, redirects, chaining, sudo, or destructive operations."}}, ["command"]),
     _tool("open_app", "Launch an installed desktop application from the controlled application allowlist.", {"app": {"type": "string", "description": "Application name."}}, ["app"]),
     _tool("service_status", "Inspect the status of one systemd service without changing it.", {"service": {"type": "string", "description": "Systemd service name."}}, ["service"]),

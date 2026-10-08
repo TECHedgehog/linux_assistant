@@ -24,4 +24,6 @@ pytest -q
 
 The supervisor owns tool permissions. Read-only tools are limited to approved
 locations, generic commands require confirmation unless proven read-only, and
-privileged or destructive operations are denied.
+privileged or destructive operations are denied. File previews are read-only;
+file changes are limited to the home directory and `/tmp`, require confirmation,
+and preserve backups.

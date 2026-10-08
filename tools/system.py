@@ -3,6 +3,10 @@ import platform
 import shutil
 import subprocess
 import re
+import difflib
+import hashlib
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from config import COMMAND_TIMEOUT, MAX_FILE_SIZE, MAX_OUTPUT
@@ -11,6 +15,7 @@ from policy import command_denial_reason, parse_command
 
 SERVICE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9@_.:-]+$")
 SAFE_READ_ROOTS = (Path.home().resolve(), Path("/tmp").resolve(), Path("/etc").resolve())
+SAFE_WRITE_ROOTS = (Path.home().resolve(), Path("/tmp").resolve())
 SENSITIVE_PARTS = {".ssh", ".gnupg", ".aws", ".kube", ".docker", ".pki", "keyrings"}
 SENSITIVE_NAMES = {
     ".env", ".bash_history", ".zsh_history", "authorized_keys", "known_hosts",
@@ -267,6 +272,130 @@ def read_file(path):
 
     except Exception as exc:
         return {"error": str(exc)}
+
+
+def _safe_write_path(path):
+    """Resolve a writable path and reject sensitive or symbolic-link targets."""
+    if not isinstance(path, str) or not path.strip():
+        return None, "Path must be a non-empty string"
+    try:
+        requested = Path(path).expanduser()
+        if requested.is_symlink():
+            return None, "Symbolic-link targets are blocked"
+        resolved = requested.resolve(strict=False)
+        parent = resolved.parent.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        return None, f"Could not resolve path: {exc}"
+    if not any(root == resolved or root in resolved.parents for root in SAFE_WRITE_ROOTS):
+        return None, "Path is outside approved writable locations"
+    if not any(root == parent or root in parent.parents for root in SAFE_WRITE_ROOTS):
+        return None, "Parent path is outside approved writable locations"
+    if set(resolved.parts) & SENSITIVE_PARTS or resolved.name in SENSITIVE_NAMES:
+        return None, "Path may contain sensitive credentials"
+    if resolved.suffix in {".pem", ".key", ".p12", ".pfx"}:
+        return None, "Credential and key files are blocked"
+    return str(resolved), None
+
+
+def _validate_edit_content(content):
+    if not isinstance(content, str):
+        return None, "Content must be a string"
+    if len(content.encode("utf-8")) > MAX_FILE_SIZE:
+        return None, f"Content is larger than {MAX_FILE_SIZE // 1024} KiB"
+    return content, None
+
+
+def _current_file_content(path):
+    file_path = Path(path)
+    if not file_path.exists():
+        return "", None
+    if not file_path.is_file():
+        return None, f"Not a regular file: {path}"
+    if file_path.stat().st_size > MAX_FILE_SIZE:
+        return None, f"File is larger than {MAX_FILE_SIZE // 1024} KiB"
+    return file_path.read_text(encoding="utf-8", errors="replace"), None
+
+
+def _content_sha256(content):
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def preview_file_edit(path, content):
+    """Return a unified diff without modifying a file."""
+    try:
+        absolute_path, error = _safe_write_path(path)
+        if error:
+            return {"error": error}
+        content, error = _validate_edit_content(content)
+        if error:
+            return {"error": error}
+        old_content, error = _current_file_content(absolute_path)
+        if error:
+            return {"error": error}
+        diff = "".join(difflib.unified_diff(
+            old_content.splitlines(keepends=True), content.splitlines(keepends=True),
+            fromfile=absolute_path, tofile=absolute_path,
+        ))
+        return {
+            "path": absolute_path,
+            "changed": old_content != content,
+            "old_sha256": _content_sha256(old_content) if Path(absolute_path).exists() else None,
+            "new_sha256": _content_sha256(content),
+            "old_size_bytes": len(old_content.encode("utf-8")),
+            "new_size_bytes": len(content.encode("utf-8")),
+            "diff": diff,
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def apply_file_edit(path, content, expected_sha256=None):
+    """Atomically apply a confirmed text edit and preserve an existing backup."""
+    temporary_path = None
+    try:
+        absolute_path, error = _safe_write_path(path)
+        if error:
+            return {"error": error}
+        content, error = _validate_edit_content(content)
+        if error:
+            return {"error": error}
+        old_content, error = _current_file_content(absolute_path)
+        if error:
+            return {"error": error}
+        if expected_sha256 and _content_sha256(old_content) != expected_sha256:
+            return {"error": "File changed since preview; create a new preview"}
+        if old_content == content:
+            return {"path": absolute_path, "changed": False,
+                    "message": "File already contains requested content"}
+
+        file_path = Path(absolute_path)
+        backup_path = None
+        if file_path.exists():
+            backup_dir = file_path.parent / ".linux-assistant-backups"
+            backup_dir.mkdir(mode=0o700, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            backup_path = backup_dir / f"{file_path.name}.{stamp}.bak"
+            shutil.copy2(file_path, backup_path)
+
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=file_path.parent,
+                                         prefix=f".{file_path.name}.", delete=False) as temporary:
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_path = temporary.name
+        os.replace(temporary_path, absolute_path)
+        return {"path": absolute_path, "changed": True,
+                "backup_path": str(backup_path) if backup_path else None,
+                "sha256": _content_sha256(content),
+                "size_bytes": len(content.encode("utf-8"))}
+    except Exception as exc:
+        return {"error": str(exc)}
+    finally:
+        if temporary_path and os.path.exists(temporary_path):
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
 
 
 def run_command(command):

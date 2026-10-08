@@ -15,6 +15,8 @@ TOOL_POLICIES = {
     "disk_usage": ToolPolicy("ALLOW"),
     "list_directory": ToolPolicy("ALLOW"),
     "read_file": ToolPolicy("ALLOW"),
+    "preview_file_edit": ToolPolicy("ALLOW"),
+    "apply_file_edit": ToolPolicy("CONFIRM"),
     "run_command": ToolPolicy("CONFIRM"),
     "open_app": ToolPolicy("ALLOW"),
     "service_status": ToolPolicy("ALLOW"),

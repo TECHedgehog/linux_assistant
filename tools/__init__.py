@@ -4,6 +4,8 @@ from .system import (
     disk_usage,
     list_directory,
     read_file,
+    preview_file_edit,
+    apply_file_edit,
     run_command,
     open_app,
     service_status,
