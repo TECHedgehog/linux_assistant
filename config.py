@@ -1,0 +1,5 @@
+OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
+MODEL = "gpt-oss:20b"
+MAX_TOOL_ROUNDS = 8
+COMMAND_TIMEOUT = 30
+MAX_OUTPUT = 12000
