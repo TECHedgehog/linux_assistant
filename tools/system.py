@@ -1,12 +1,37 @@
 import os
 import platform
-import shlex
 import shutil
 import subprocess
 import re
+from pathlib import Path
+
+from config import COMMAND_TIMEOUT, MAX_FILE_SIZE, MAX_OUTPUT
+from policy import command_denial_reason, parse_command
 
 
 SERVICE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9@_.:-]+$")
+SAFE_READ_ROOTS = (Path.home().resolve(), Path("/tmp").resolve(), Path("/etc").resolve())
+SENSITIVE_PARTS = {".ssh", ".gnupg", ".aws", ".kube", ".docker", ".pki", "keyrings"}
+SENSITIVE_NAMES = {
+    ".env", ".bash_history", ".zsh_history", "authorized_keys", "known_hosts",
+    "shadow", "credentials", "token",
+}
+
+
+def _safe_read_path(path):
+    """Resolve a path and reject sensitive files or paths outside safe roots."""
+    try:
+        resolved = Path(path).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        return None, f"Could not resolve path: {exc}"
+
+    if not any(root == resolved or root in resolved.parents for root in SAFE_READ_ROOTS):
+        return None, "Path is outside approved read-only locations"
+    if set(resolved.parts) & SENSITIVE_PARTS or resolved.name in SENSITIVE_NAMES:
+        return None, "Path may contain sensitive credentials"
+    if resolved.suffix in {".pem", ".key", ".p12", ".pfx"}:
+        return None, "Credential and key files are blocked"
+    return str(resolved), None
 
 
 def system_info():
@@ -178,7 +203,9 @@ def disk_usage(path="/"):
 def list_directory(path="."):
     """List files and directories."""
     try:
-        absolute_path = os.path.abspath(os.path.expanduser(path))
+        absolute_path, error = _safe_read_path(path)
+        if error:
+            return {"error": error}
 
         entries = []
 
@@ -186,6 +213,8 @@ def list_directory(path="."):
             os.scandir(absolute_path),
             key=lambda item: (not item.is_dir(), item.name.lower()),
         ):
+            if entry.name in SENSITIVE_NAMES or entry.name in SENSITIVE_PARTS:
+                continue
             try:
                 entries.append(
                     {
@@ -215,16 +244,16 @@ def list_directory(path="."):
 def read_file(path):
     """Read a text file with a reasonable size limit."""
     try:
-        absolute_path = os.path.abspath(os.path.expanduser(path))
+        absolute_path, error = _safe_read_path(path)
+        if error:
+            return {"error": error}
 
         if not os.path.isfile(absolute_path):
             return {"error": f"Not a regular file: {absolute_path}"}
 
-        max_size = 256 * 1024
-
-        if os.path.getsize(absolute_path) > max_size:
+        if os.path.getsize(absolute_path) > MAX_FILE_SIZE:
             return {
-                "error": f"File is larger than {max_size // 1024} KiB",
+                "error": f"File is larger than {MAX_FILE_SIZE // 1024} KiB",
                 "path": absolute_path,
             }
 
@@ -250,78 +279,37 @@ def run_command(command):
     if not command:
         return {"error": "Empty command"}
 
-    blocked_commands = [
-        "sudo",
-        "su ",
-        "doas",
-        "rm ",
-        "rm\t",
-        "mkfs",
-        "fdisk",
-        "parted",
-        "dd ",
-        "shutdown",
-        "reboot",
-        "poweroff",
-        "systemctl disable",
-        "systemctl mask",
-        "chmod -R",
-        "chown -R",
-        "> /dev/",
-    ]
+    denial_reason = command_denial_reason(command)
+    if denial_reason:
+        return {
+            "blocked": True,
+            "reason": denial_reason,
+        }
 
-    lower_command = command.lower()
-
-    for blocked in blocked_commands:
-        if blocked in lower_command:
-            return {
-                "blocked": True,
-                "reason": f"Command blocked for safety: {blocked.strip()}",
-            }
-
-    shell_operators = [
-        "|",
-        ">",
-        ">>",
-        "&&",
-        "||",
-        ";",
-        "`",
-        "$(",
-    ]
-
-    for operator in shell_operators:
-        if operator in command:
-            return {
-                "blocked": True,
-                "reason": f"Shell operator blocked for safety: {operator}",
-            }
+    args = parse_command(command)
+    if not args:
+        return {"error": "Could not parse command"}
 
     try:
-        args = shlex.split(command)
-
-        if not args:
-            return {"error": "Could not parse command"}
-
         result = subprocess.run(
             args,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=COMMAND_TIMEOUT,
             check=False,
         )
 
         return {
             "command": command,
             "return_code": result.returncode,
-            "stdout": result.stdout[:12000],
-            "stderr": result.stderr[:12000],
+            "stdout": result.stdout[:MAX_OUTPUT],
+            "stderr": result.stderr[:MAX_OUTPUT],
         }
 
     except subprocess.TimeoutExpired:
         return {
             "command": command,
-            "error": "Command timed out after 30 seconds",
+            "error": f"Command timed out after {COMMAND_TIMEOUT} seconds",
         }
 
     except Exception as exc:
@@ -342,6 +330,9 @@ def _validate_service_name(service):
 
     if len(service) > 256:
         return None, "Service name is too long"
+
+    if service.startswith("-"):
+        return None, "Invalid service name"
 
     if not SERVICE_NAME_PATTERN.fullmatch(service):
         return None, "Invalid service name"

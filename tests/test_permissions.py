@@ -1,7 +1,7 @@
 import unittest
 
 from assistant import execute_tool, tool_risk
-from tools import service_status
+from tools import read_file, service_status
 
 
 class PermissionTests(unittest.TestCase):
@@ -43,6 +43,24 @@ class PermissionTests(unittest.TestCase):
         )
         self.assertTrue(result["denied"])
         self.assertFalse(result["confirmed"])
+
+    def test_shell_composition_is_denied(self):
+        self.assertEqual(
+            tool_risk("run_command", {"command": "echo safe; reboot"}),
+            "DENY",
+        )
+
+    def test_leading_dash_service_name_is_rejected(self):
+        result = service_status("--no-pager")
+        self.assertIn("error", result)
+
+    def test_sensitive_file_is_rejected(self):
+        result = read_file("/etc/shadow")
+        self.assertIn("error", result)
+
+    def test_file_outside_approved_roots_is_rejected(self):
+        result = read_file("/var/log/syslog")
+        self.assertIn("error", result)
 
 
 if __name__ == "__main__":

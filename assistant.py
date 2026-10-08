@@ -1,17 +1,15 @@
 import json
-import shlex
 import sys
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
 
 from config import (
     COMMAND_TIMEOUT,
-    MAX_OUTPUT,
     MAX_TOOL_ROUNDS,
     MODEL,
     OLLAMA_URL,
 )
+from policy import tool_risk as supervisor_tool_risk
 
 from tools import (
     disk_usage,
@@ -277,118 +275,9 @@ TOOL_FUNCTIONS = {
 }
 
 
-@dataclass(frozen=True)
-class ToolPolicy:
-    """Supervisor-owned policy for one tool."""
-
-    default_risk: str
-
-
-TOOL_POLICIES = {
-    "system_info": ToolPolicy("ALLOW"),
-    "list_processes": ToolPolicy("ALLOW"),
-    "disk_usage": ToolPolicy("ALLOW"),
-    "list_directory": ToolPolicy("ALLOW"),
-    "read_file": ToolPolicy("ALLOW"),
-    "run_command": ToolPolicy("CONFIRM"),
-    "open_app": ToolPolicy("ALLOW"),
-    "service_status": ToolPolicy("ALLOW"),
-    "service_logs": ToolPolicy("ALLOW"),
-    "start_service": ToolPolicy("CONFIRM"),
-    "stop_service": ToolPolicy("CONFIRM"),
-    "restart_service": ToolPolicy("CONFIRM"),
-}
-
-READ_ONLY_COMMANDS = {
-    "cat",
-    "command",
-    "df",
-    "du",
-    "free",
-    "grep",
-    "head",
-    "id",
-    "journalctl",
-    "lspci",
-    "ls",
-    "ps",
-    "pwd",
-    "uname",
-    "uptime",
-    "w",
-    "which",
-    "whoami",
-}
-
-DENIED_COMMANDS = {
-    "sudo",
-    "su",
-    "doas",
-    "pkexec",
-    "rm",
-    "mkfs",
-    "fdisk",
-    "parted",
-    "dd",
-    "shutdown",
-    "reboot",
-    "poweroff",
-    "chmod",
-    "chown",
-}
-
-DENIED_SHELL_MARKERS = (
-    "|",
-    ">",
-    ";",
-    "`",
-    "$ (",
-    "$(",
-)
-
-
 def tool_risk(name, arguments):
     """Return supervisor-owned risk decision for a tool request."""
-    policy = TOOL_POLICIES.get(name)
-
-    if policy is None:
-        return "DENY"
-
-    if name != "run_command":
-        return policy.default_risk
-
-    command = arguments.get("command", "")
-
-    if not isinstance(command, str) or not command.strip():
-        return "DENY"
-
-    lower_command = command.lower()
-
-    if any(marker in lower_command for marker in DENIED_SHELL_MARKERS):
-        return "DENY"
-
-    try:
-        command_args = shlex.split(command)
-    except ValueError:
-        return "DENY"
-
-    if not command_args:
-        return "DENY"
-
-    command_name = command_args[0].rsplit("/", 1)[-1]
-
-    if command_name in DENIED_COMMANDS:
-        return "DENY"
-
-    if command_name == "systemctl" and any(
-        action in {"disable", "mask"} for action in command_args[1:]
-    ):
-        return "DENY"
-
-    if command_name in READ_ONLY_COMMANDS:
-        return "ALLOW"
-
-    return policy.default_risk
+    return supervisor_tool_risk(name, arguments)
 
 
 def confirm_tool_call(name, arguments):
@@ -441,7 +330,13 @@ def ollama_request(messages):
         ) as response:
             body = response.read().decode("utf-8")
 
-        return json.loads(body)
+        parsed = json.loads(body)
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("message"), dict):
+            raise RuntimeError("Ollama returned an invalid response")
+        return parsed
+
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Ollama returned invalid JSON") from exc
 
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
@@ -521,6 +416,12 @@ def ask(messages):
 
             name = function_data.get("name")
             arguments = function_data.get("arguments", {})
+
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
 
             if name not in TOOL_FUNCTIONS:
                 result = {
