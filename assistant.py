@@ -1,12 +1,16 @@
 import json
+import socket
 import sys
+import time
 import urllib.error
 import urllib.request
 
 from config import (
-    COMMAND_TIMEOUT,
     MAX_TOOL_ROUNDS,
     MODEL,
+    OLLAMA_RETRIES,
+    OLLAMA_RETRY_BACKOFF,
+    OLLAMA_TIMEOUT,
     OLLAMA_URL,
 )
 from policy import tool_risk as supervisor_tool_risk
@@ -323,31 +327,56 @@ def ollama_request(messages):
         method="POST",
     )
 
-    try:
-        with urllib.request.urlopen(
-            request,
-            timeout=COMMAND_TIMEOUT + 60,
-        ) as response:
-            body = response.read().decode("utf-8")
+    for attempt in range(OLLAMA_RETRIES + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT) as response:
+                status = getattr(response, "status", None)
+                if not isinstance(status, int):
+                    status = response.getcode()
+                if not isinstance(status, int) or not 200 <= status < 300:
+                    raise RuntimeError(f"Ollama returned HTTP status {status}")
 
-        parsed = json.loads(body)
-        if not isinstance(parsed, dict) or not isinstance(parsed.get("message"), dict):
-            raise RuntimeError("Ollama returned an invalid response")
-        return parsed
+                body = response.read().decode("utf-8")
 
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Ollama returned invalid JSON") from exc
+            parsed = json.loads(body)
+            return validate_ollama_response(parsed)
 
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"Ollama HTTP {exc.code}: {body}"
-        ) from exc
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace").strip()
+            detail = f": {body}" if body else ""
+            raise RuntimeError(f"Ollama HTTP {exc.code}{detail}") from exc
 
-    except urllib.error.URLError as exc:
-        raise RuntimeError(
-            f"Could not connect to Ollama: {exc.reason}"
-        ) from exc
+        except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+            if attempt < OLLAMA_RETRIES:
+                time.sleep(OLLAMA_RETRY_BACKOFF * (2**attempt))
+                continue
+
+            reason = getattr(exc, "reason", exc)
+            raise RuntimeError(f"Could not connect to Ollama: {reason}") from exc
+
+        except UnicodeDecodeError as exc:
+            raise RuntimeError("Ollama returned a response that was not valid UTF-8") from exc
+
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Ollama returned invalid JSON") from exc
+
+
+def validate_ollama_response(response):
+    """Validate the subset of Ollama's response used by the assistant."""
+    if not isinstance(response, dict):
+        raise RuntimeError("Ollama returned an invalid response: expected an object")
+
+    message = response.get("message")
+    if not isinstance(message, dict):
+        raise RuntimeError("Ollama returned an invalid response: missing message")
+    if not isinstance(message.get("content"), str):
+        raise RuntimeError("Ollama returned an invalid message: content must be text")
+
+    tool_calls = message.get("tool_calls", [])
+    if not isinstance(tool_calls, list):
+        raise RuntimeError("Ollama returned an invalid message: tool_calls must be a list")
+
+    return response
 
 
 def execute_tool(name, arguments, confirm_callback=None):
@@ -412,16 +441,40 @@ def ask(messages):
         messages.append(message)
 
         for tool_call in tool_calls:
-            function_data = tool_call.get("function", {})
+            if not isinstance(tool_call, dict) or not isinstance(
+                tool_call.get("function"), dict
+            ):
+                result = {"error": "Malformed Ollama tool call: function must be an object."}
+                messages.append(
+                    {"role": "tool", "content": json.dumps(result, ensure_ascii=False)}
+                )
+                continue
 
+            function_data = tool_call["function"]
             name = function_data.get("name")
-            arguments = function_data.get("arguments", {})
+            arguments = function_data.get("arguments")
+
+            if not isinstance(name, str) or not name:
+                result = {"error": "Malformed Ollama tool call: tool name is required."}
+                messages.append(
+                    {"role": "tool", "content": json.dumps(result, ensure_ascii=False)}
+                )
+                continue
 
             if isinstance(arguments, str):
                 try:
                     arguments = json.loads(arguments)
                 except json.JSONDecodeError:
-                    arguments = {}
+                    arguments = None
+
+            if not isinstance(arguments, dict):
+                result = {
+                    "error": f"Malformed arguments for tool '{name}'; tool was not executed."
+                }
+                messages.append(
+                    {"role": "tool", "content": json.dumps(result, ensure_ascii=False)}
+                )
+                continue
 
             if name not in TOOL_FUNCTIONS:
                 result = {
@@ -438,9 +491,6 @@ def ask(messages):
                     }
                 )
                 continue
-
-            if not isinstance(arguments, dict):
-                arguments = {}
 
             tool_key = (
                 name,
