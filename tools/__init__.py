@@ -6,4 +6,9 @@ from .system import (
     read_file,
     run_command,
     open_app,
+    service_status,
+    service_logs,
+    start_service,
+    stop_service,
+    restart_service,
 )

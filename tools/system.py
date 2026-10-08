@@ -3,6 +3,10 @@ import platform
 import shlex
 import shutil
 import subprocess
+import re
+
+
+SERVICE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9@_.:-]+$")
 
 
 def system_info():
@@ -325,6 +329,134 @@ def run_command(command):
             "command": command,
             "error": str(exc),
         }
+
+
+def _validate_service_name(service):
+    if not isinstance(service, str):
+        return None, "Service name must be a string"
+
+    service = service.strip()
+
+    if not service:
+        return None, "Service name cannot be empty"
+
+    if len(service) > 256:
+        return None, "Service name is too long"
+
+    if not SERVICE_NAME_PATTERN.fullmatch(service):
+        return None, "Invalid service name"
+
+    return service, None
+
+
+def _systemctl(args, service):
+    try:
+        result = subprocess.run(
+            ["systemctl", *args, service],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+        return {
+            "service": service,
+            "return_code": result.returncode,
+            "stdout": result.stdout[:12000],
+            "stderr": result.stderr[:12000],
+        }
+
+    except subprocess.TimeoutExpired:
+        return {
+            "service": service,
+            "error": "systemctl timed out after 10 seconds",
+        }
+
+    except FileNotFoundError:
+        return {"service": service, "error": "systemctl is not available"}
+
+    except Exception as exc:
+        return {"service": service, "error": str(exc)}
+
+
+def _journalctl(args, service):
+    try:
+        result = subprocess.run(
+            ["journalctl", *args, service],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+        return {
+            "service": service,
+            "return_code": result.returncode,
+            "stdout": result.stdout[:12000],
+            "stderr": result.stderr[:12000],
+        }
+
+    except subprocess.TimeoutExpired:
+        return {
+            "service": service,
+            "error": "journalctl timed out after 10 seconds",
+        }
+
+    except FileNotFoundError:
+        return {"service": service, "error": "journalctl is not available"}
+
+    except Exception as exc:
+        return {"service": service, "error": str(exc)}
+
+
+def service_status(service):
+    """Return status for one systemd service without changing it."""
+    service, error = _validate_service_name(service)
+
+    if error:
+        return {"error": error}
+
+    return _systemctl(["status", "--no-pager", "--full"], service)
+
+
+def service_logs(service, lines=100):
+    """Return recent journal entries for one systemd service."""
+    service, error = _validate_service_name(service)
+
+    if error:
+        return {"error": error}
+
+    if not isinstance(lines, int) or isinstance(lines, bool):
+        return {"error": "lines must be an integer"}
+
+    if lines < 1 or lines > 200:
+        return {"error": "lines must be between 1 and 200"}
+
+    return _journalctl(["--no-pager", "-n", str(lines), "-u"], service)
+
+
+def _change_service(service, action):
+    service, error = _validate_service_name(service)
+
+    if error:
+        return {"error": error}
+
+    return _systemctl([action], service)
+
+
+def start_service(service):
+    """Start one systemd service."""
+    return _change_service(service, "start")
+
+
+def stop_service(service):
+    """Stop one systemd service."""
+    return _change_service(service, "stop")
+
+
+def restart_service(service):
+    """Restart one systemd service."""
+    return _change_service(service, "restart")
 
 def open_app(app):
     """Launch an installed desktop application by its desktop entry."""

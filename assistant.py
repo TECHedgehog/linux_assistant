@@ -1,7 +1,9 @@
 import json
+import shlex
 import sys
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 
 from config import (
     COMMAND_TIMEOUT,
@@ -19,6 +21,11 @@ from tools import (
     run_command,
     system_info,
     open_app,
+    service_status,
+    service_logs,
+    start_service,
+    stop_service,
+    restart_service,
 )
 
 
@@ -39,6 +46,9 @@ Tool rules:
 - For CPU, GPU, RAM, disk, and kernel questions, use system_info().
 - For directory listings, use list_directory().
 - For reading files, use read_file().
+- For service status, use service_status().
+- For service logs, use service_logs().
+- For service changes, use the dedicated service tool and let the supervisor request confirmation.
 - Use run_command only when no dedicated tool can perform the requested action.
 
 Safety rules:
@@ -47,6 +57,8 @@ Safety rules:
 - Never request sudo.
 - Never attempt destructive filesystem, partition, bootloader, or security operations.
 - Never attempt to bypass a blocked tool.
+- The supervisor decides whether a tool is allowed, requires confirmation, or is denied.
+- Never claim confirmation or permission that the supervisor did not provide.
 - Keep responses concise and factual.
 """
 
@@ -157,6 +169,95 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "service_status",
+            "description": "Inspect the status of one systemd service without changing it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "description": "Systemd service name, such as ollama.service.",
+                    }
+                },
+                "required": ["service"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "service_logs",
+            "description": "Read recent journal entries for one systemd service.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "description": "Systemd service name, such as ollama.service.",
+                    },
+                    "lines": {
+                        "type": "integer",
+                        "description": "Number of recent lines to return, from 1 to 200.",
+                    },
+                },
+                "required": ["service"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_service",
+            "description": "Start one systemd service after user confirmation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "description": "Systemd service name.",
+                    }
+                },
+                "required": ["service"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_service",
+            "description": "Stop one systemd service after user confirmation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "description": "Systemd service name.",
+                    }
+                },
+                "required": ["service"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "restart_service",
+            "description": "Restart one systemd service after user confirmation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "description": "Systemd service name.",
+                    }
+                },
+                "required": ["service"],
+            },
+        },
+    },
 ]
 
 
@@ -168,7 +269,145 @@ TOOL_FUNCTIONS = {
     "read_file": read_file,
     "run_command": run_command,
     "open_app": open_app,
+    "service_status": service_status,
+    "service_logs": service_logs,
+    "start_service": start_service,
+    "stop_service": stop_service,
+    "restart_service": restart_service,
 }
+
+
+@dataclass(frozen=True)
+class ToolPolicy:
+    """Supervisor-owned policy for one tool."""
+
+    default_risk: str
+
+
+TOOL_POLICIES = {
+    "system_info": ToolPolicy("ALLOW"),
+    "list_processes": ToolPolicy("ALLOW"),
+    "disk_usage": ToolPolicy("ALLOW"),
+    "list_directory": ToolPolicy("ALLOW"),
+    "read_file": ToolPolicy("ALLOW"),
+    "run_command": ToolPolicy("CONFIRM"),
+    "open_app": ToolPolicy("ALLOW"),
+    "service_status": ToolPolicy("ALLOW"),
+    "service_logs": ToolPolicy("ALLOW"),
+    "start_service": ToolPolicy("CONFIRM"),
+    "stop_service": ToolPolicy("CONFIRM"),
+    "restart_service": ToolPolicy("CONFIRM"),
+}
+
+READ_ONLY_COMMANDS = {
+    "cat",
+    "command",
+    "df",
+    "du",
+    "free",
+    "grep",
+    "head",
+    "id",
+    "journalctl",
+    "lspci",
+    "ls",
+    "ps",
+    "pwd",
+    "uname",
+    "uptime",
+    "w",
+    "which",
+    "whoami",
+}
+
+DENIED_COMMANDS = {
+    "sudo",
+    "su",
+    "doas",
+    "pkexec",
+    "rm",
+    "mkfs",
+    "fdisk",
+    "parted",
+    "dd",
+    "shutdown",
+    "reboot",
+    "poweroff",
+    "chmod",
+    "chown",
+}
+
+DENIED_SHELL_MARKERS = (
+    "|",
+    ">",
+    ";",
+    "`",
+    "$ (",
+    "$(",
+)
+
+
+def tool_risk(name, arguments):
+    """Return supervisor-owned risk decision for a tool request."""
+    policy = TOOL_POLICIES.get(name)
+
+    if policy is None:
+        return "DENY"
+
+    if name != "run_command":
+        return policy.default_risk
+
+    command = arguments.get("command", "")
+
+    if not isinstance(command, str) or not command.strip():
+        return "DENY"
+
+    lower_command = command.lower()
+
+    if any(marker in lower_command for marker in DENIED_SHELL_MARKERS):
+        return "DENY"
+
+    try:
+        command_args = shlex.split(command)
+    except ValueError:
+        return "DENY"
+
+    if not command_args:
+        return "DENY"
+
+    command_name = command_args[0].rsplit("/", 1)[-1]
+
+    if command_name in DENIED_COMMANDS:
+        return "DENY"
+
+    if command_name == "systemctl" and any(
+        action in {"disable", "mask"} for action in command_args[1:]
+    ):
+        return "DENY"
+
+    if command_name in READ_ONLY_COMMANDS:
+        return "ALLOW"
+
+    return policy.default_risk
+
+
+def confirm_tool_call(name, arguments):
+    """Ask the local user to approve a confirmation-required tool call."""
+    print(
+        "\n[confirmation required] "
+        f"Allow {name}({json.dumps(arguments, ensure_ascii=False)})? [y/N] ",
+        end="",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    try:
+        answer = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print(file=sys.stderr)
+        return False
+
+    return answer in {"y", "yes"}
 
 
 def ollama_request(messages):
@@ -216,18 +455,38 @@ def ollama_request(messages):
         ) from exc
 
 
-def execute_tool(name, arguments):
-    """Execute one tool call."""
+def execute_tool(name, arguments, confirm_callback=None):
+    """Execute one tool call after supervisor permission checks."""
     function = TOOL_FUNCTIONS.get(name)
 
     if function is None:
         return {
+            "denied": True,
+            "risk": "DENY",
             "error": f"Unknown tool: {name}",
         }
 
     try:
         if not isinstance(arguments, dict):
             arguments = {}
+
+        risk = tool_risk(name, arguments)
+
+        if risk == "DENY":
+            return {
+                "denied": True,
+                "risk": risk,
+                "error": f"Supervisor denied tool request: {name}",
+            }
+
+        if risk == "CONFIRM":
+            if confirm_callback is None or not confirm_callback(name, arguments):
+                return {
+                    "denied": True,
+                    "risk": risk,
+                    "confirmed": False,
+                    "error": f"User did not confirm tool request: {name}",
+                }
 
         return function(**arguments)
 
@@ -306,7 +565,11 @@ def ask(messages):
                     file=sys.stderr,
                 )
 
-                result = execute_tool(name, arguments)
+                result = execute_tool(
+                    name,
+                    arguments,
+                    confirm_callback=confirm_tool_call,
+                )
 
             messages.append(
                 {
