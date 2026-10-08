@@ -6,6 +6,9 @@ import urllib.error
 import urllib.request
 
 from config import (
+    MAX_DUPLICATE_TOOL_CALLS,
+    MAX_HISTORY_MESSAGES,
+    MAX_HISTORY_TOKENS,
     MAX_TOOL_ROUNDS,
     MODEL,
     OLLAMA_RETRIES,
@@ -420,9 +423,63 @@ def execute_tool(name, arguments, confirm_callback=None):
         }
 
 
+def approximate_tokens(message):
+    """Estimate tokens without requiring a model-specific tokenizer."""
+    return max(1, (len(json.dumps(message, ensure_ascii=False)) + 3) // 4)
+
+
+def _history_exchanges(messages):
+    """Return conversation exchanges, excluding the system prompt."""
+    exchanges = []
+    current = []
+
+    for message in messages[1:]:
+        if message.get("role") == "user" and current:
+            exchanges.append(current)
+            current = []
+        current.append(message)
+
+    if current:
+        exchanges.append(current)
+
+    return exchanges
+
+
+def trim_history(
+    messages,
+    max_messages=MAX_HISTORY_MESSAGES,
+    max_tokens=MAX_HISTORY_TOKENS,
+):
+    """Trim oldest complete exchanges while preserving system and active context."""
+    if not messages:
+        return messages
+
+    system = messages[:1]
+    exchanges = _history_exchanges(messages)
+
+    def exceeds_limit(candidate):
+        message_count = len(system) + sum(len(exchange) for exchange in candidate)
+        token_count = approximate_tokens(system[0]) + sum(
+            approximate_tokens(message)
+            for exchange in candidate
+            for message in exchange
+        )
+        return (
+            (max_messages > 0 and message_count > max_messages)
+            or (max_tokens > 0 and token_count > max_tokens)
+        )
+
+    while len(exchanges) > 1 and exceeds_limit(exchanges):
+        exchanges.pop(0)
+
+    messages[:] = system + [message for exchange in exchanges for message in exchange]
+    return messages
+
+
 def ask(messages):
     """Run the model/tool loop with supervisor-side safety limits."""
     called_tools = set()
+    duplicate_tool_calls = 0
 
     for _ in range(MAX_TOOL_ROUNDS):
         response = ollama_request(messages)
@@ -502,12 +559,21 @@ def ask(messages):
             )
 
             if tool_key in called_tools:
+                duplicate_tool_calls += 1
                 result = {
                     "error": (
                         f"This exact tool call has already been executed: "
                         f"{name}({json.dumps(arguments, ensure_ascii=False)})"
                     )
                 }
+                if duplicate_tool_calls >= max(1, MAX_DUPLICATE_TOOL_CALLS):
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "content": json.dumps(result, ensure_ascii=False),
+                        }
+                    )
+                    return "The assistant stopped a repeated tool-call loop."
             else:
                 called_tools.add(tool_key)
 
@@ -560,6 +626,7 @@ def main():
         if user_input.lower() in {"exit", "quit"}:
             break
 
+        trim_history(messages)
         messages.append(
             {
                 "role": "user",
@@ -576,6 +643,7 @@ def main():
                     "content": answer,
                 }
             )
+            trim_history(messages)
 
             print(f"\nAssistant> {answer}\n")
 

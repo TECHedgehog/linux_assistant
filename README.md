@@ -11,6 +11,11 @@ python assistant.py
 Ollama must be running locally with the configured model. Configuration can be
 overridden with `LINUX_ASSISTANT_MODEL` and `LINUX_ASSISTANT_OLLAMA_URL`.
 
+Conversation history is bounded by `LINUX_ASSISTANT_MAX_HISTORY_MESSAGES` (80)
+and `LINUX_ASSISTANT_MAX_HISTORY_TOKENS` (12000, approximate). Set either to
+`0` to disable that limit. Repeated identical tool calls are stopped after
+`LINUX_ASSISTANT_MAX_DUPLICATE_TOOL_CALLS` (1) duplicate.
+
 ## Test
 
 ```fish
