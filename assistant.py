@@ -1,4 +1,4 @@
-"""Compatibility entry point for Linux Assistant."""
+"""Compatibility entry point for Liam."""
 
 from cli import confirm_tool_call, main
 from config import OLLAMA_RETRIES, OLLAMA_TIMEOUT, OLLAMA_URL

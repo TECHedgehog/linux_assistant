@@ -1,1 +1,1 @@
-"""Test package for Linux Assistant."""
+"""Test package for Liam."""

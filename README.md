@@ -1,6 +1,6 @@
-# Linux Assistant
+# Liam
 
-Local-first Linux desktop assistant for Ollama, CachyOS, Hyprland, and Caelestia.
+Liam is a local-first Linux desktop assistant for Ollama, CachyOS, Hyprland, and Caelestia.
 
 ## Run
 
@@ -9,12 +9,12 @@ python assistant.py
 ```
 
 Ollama must be running locally with the configured model. Configuration can be
-overridden with `LINUX_ASSISTANT_MODEL` and `LINUX_ASSISTANT_OLLAMA_URL`.
+overridden with `LIAM_MODEL` and `LIAM_OLLAMA_URL` environment variables.
 
-Conversation history is bounded by `LINUX_ASSISTANT_MAX_HISTORY_MESSAGES` (80)
-and `LINUX_ASSISTANT_MAX_HISTORY_TOKENS` (12000, approximate). Set either to
+Conversation history is bounded by `LIAM_MAX_HISTORY_MESSAGES` (80)
+and `LIAM_MAX_HISTORY_TOKENS` (12000, approximate). Set either to
 `0` to disable that limit. Repeated identical tool calls are stopped after
-`LINUX_ASSISTANT_MAX_DUPLICATE_TOOL_CALLS` (1) duplicate.
+`LIAM_MAX_DUPLICATE_TOOL_CALLS` (1) duplicate.
 
 ## Test
 

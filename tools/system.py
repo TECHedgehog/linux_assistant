@@ -371,7 +371,7 @@ def apply_file_edit(path, content, expected_sha256=None):
         file_path = Path(absolute_path)
         backup_path = None
         if file_path.exists():
-            backup_dir = file_path.parent / ".linux-assistant-backups"
+            backup_dir = file_path.parent / ".liam-backups"
             backup_dir.mkdir(mode=0o700, exist_ok=True)
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
             backup_path = backup_dir / f"{file_path.name}.{stamp}.bak"

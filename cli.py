@@ -57,7 +57,7 @@ def _show_tool(name, arguments):
 
 
 def main():
-    print(f"Linux Assistant — {MODEL}")
+    print(f"Liam — {MODEL}")
     print("Type 'exit' or 'quit' to leave.\n")
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     while True:
