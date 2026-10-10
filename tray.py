@@ -1,11 +1,90 @@
 """Tray entry point for Liam's floating desktop interface."""
 
 import signal
+import os
+import subprocess
 import sys
+import time
+from pathlib import Path
 
 from desktop_ui import FloatingChat
+from layer_shell_ipc import send_command, socket_path
 from PySide6.QtGui import QAction, QCursor, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+
+
+class _LayerButtonState:
+    def __init__(self):
+        self.visible = True
+
+    def isVisible(self):
+        return self.visible
+
+
+class LayerShellController:
+    """Control the optional GTK layer-shell frontend through private IPC."""
+
+    def __init__(self):
+        self.process = subprocess.Popen(
+            [sys.executable, str(Path(__file__).with_name("layer_shell_ui.py"))]
+        )
+        self.path = socket_path()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if self.path.exists():
+                break
+            if self.process.poll() is not None:
+                raise RuntimeError("layer-shell frontend exited during startup")
+            time.sleep(0.02)
+        if not self.path.exists():
+            self.process.terminate()
+            raise RuntimeError("layer-shell frontend did not create its socket")
+        self.button = _LayerButtonState()
+        self.conversation = self
+
+    def _send(self, command):
+        try:
+            send_command(self.path, command)
+        except OSError:
+            self.button.visible = False
+
+    def show_button(self, checked=False):
+        self.button.visible = True
+        self._send("show")
+
+    def hide_button(self, checked=False):
+        self.button.visible = False
+        self._send("hide")
+
+    def clear(self):
+        self._send("clear")
+
+    def hide(self):
+        self.hide_button()
+
+    def close(self):
+        self._send("quit")
+        try:
+            self.process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            self.process.terminate()
+
+
+def create_floating_chat():
+    """Prefer layer-shell on Wayland and retain the Qt fallback."""
+    if os.environ.get("WAYLAND_DISPLAY"):
+        check = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("layer_shell_ui.py")), "--check"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if check.returncode == 0:
+            try:
+                return LayerShellController()
+            except (OSError, RuntimeError):
+                pass
+    return FloatingChat()
 
 
 class TrayApplication:
@@ -13,7 +92,7 @@ class TrayApplication:
 
     def __init__(self, app):
         self.app = app
-        self.floating_chat = FloatingChat()
+        self.floating_chat = create_floating_chat()
         self.menu = QMenu()
 
         show_button_action = QAction("Show floating button", self.menu)
@@ -44,8 +123,11 @@ class TrayApplication:
     def shutdown(self, checked=False):
         """Hide desktop surfaces before stopping the Qt event loop."""
         self.tray.hide()
-        self.floating_chat.conversation.hide()
-        self.floating_chat.button.hide()
+        if isinstance(self.floating_chat, LayerShellController):
+            self.floating_chat.close()
+        else:
+            self.floating_chat.conversation.hide()
+            self.floating_chat.button.hide()
         self.app.quit()
 
     def update_button_actions(self, show_action, hide_action):

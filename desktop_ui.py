@@ -73,19 +73,14 @@ class AssistantWorker(QObject):
 
 
 class ConversationPanel(QWidget):
-    """Small persistent conversation window."""
+    """Small conversation panel embedded in the floating launcher."""
 
-    def __init__(self):
-        super().__init__(None)
+    def __init__(self, parent=None):
+        super().__init__(parent)
         self.session = AssistantSession()
         self.worker = None
         self.thread = None
-        self.setWindowTitle("Liam")
-        self.setWindowFlags(
-            Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
-        )
-        self.setAttribute(Qt.WA_QuitOnClose, False)
-        self.setMinimumWidth(390)
+        self.setMinimumWidth(350)
 
         title = QLabel("<b>Liam</b>")
         title.setAlignment(Qt.AlignCenter)
@@ -185,24 +180,19 @@ class ConversationPanel(QWidget):
         self.transcript.clear()
         self.status.setText("Ready")
 
-    def closeEvent(self, event):
-        """Hide the panel instead of destroying the persistent chat session."""
-        self.hide()
-        event.ignore()
-
-
 class FloatingButton(QPushButton):
-    """Compact launcher that stays available above normal application windows."""
+    """Compact launcher with click-versus-drag handling."""
 
-    def __init__(self, clicked):
-        super().__init__("L")
-        self.setWindowTitle("Liam")
+    def __init__(self, clicked, drag_started, dragged, drag_finished, parent=None):
+        super().__init__("L", parent)
+        self._clicked_callback = clicked
+        self._drag_started_callback = drag_started
+        self._dragged_callback = dragged
+        self._drag_finished_callback = drag_finished
+        self._press_position = None
+        self._dragging = False
         self.setToolTip("Open Liam")
         self.setFixedSize(48, 48)
-        self.setWindowFlags(
-            Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
-        )
-        self.setAttribute(Qt.WA_QuitOnClose, False)
         self.setStyleSheet(
             """
             QPushButton {
@@ -217,60 +207,258 @@ class FloatingButton(QPushButton):
             QPushButton:pressed { background: #4c566a; }
             """
         )
-        self.clicked.connect(clicked)
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            event.ignore()
+            return
+        self._press_position = event.globalPosition().toPoint()
+        self._dragging = False
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._press_position is None:
+            return
+        current = event.globalPosition().toPoint()
+        if not self._dragging:
+            if (current - self._press_position).manhattanLength() < QApplication.startDragDistance():
+                return
+            self._dragging = True
+            self._drag_started_callback(self._press_position)
+        self._dragged_callback(current)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            event.ignore()
+            return
+        was_dragging = self._dragging
+        position = event.globalPosition().toPoint()
+        self._press_position = None
+        self._dragging = False
+        if was_dragging:
+            self._drag_finished_callback(position)
+        else:
+            self._clicked_callback()
+        event.accept()
+
+
+class FloatingSurface(QWidget):
+    """Frameless top-level surface that hides instead of closing the tray app."""
+
+    def __init__(self, close_callback):
+        super().__init__()
+        self._close_callback = close_callback
 
     def closeEvent(self, event):
+        self._close_callback()
         event.ignore()
 
 
 class FloatingChat:
-    """Own and position the launcher and its connected conversation window."""
+    """Single top-level surface containing the launcher and chat panel."""
+
+    EDGE_SNAP_DISTANCE = 24
+    VISIBLE_EDGE_PORTION = 12
+    EXPANSION_GAP = 8
 
     def __init__(self):
-        self.conversation = ConversationPanel()
-        self.button = FloatingButton(self.toggle)
-        self.button.show()
+        self.window = FloatingSurface(self.hide_button)
+        self.window.setWindowTitle("Liam")
+        self.window.setWindowFlags(
+            Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+        )
+        self.window.setAttribute(Qt.WA_QuitOnClose, False)
+        self.window.setObjectName("floatingSurface")
+        self.window.setStyleSheet("QWidget#floatingSurface { background: transparent; }")
+        self.conversation = ConversationPanel(self.window)
+        self.button = FloatingButton(
+            self.toggle,
+            self._drag_started,
+            self._dragged,
+            self._drag_finished,
+            self.window,
+        )
+        self.expanded = False
+        self.docked_edge = None
+        self._drag_offset = None
+        self._button_global_position = None
+        self.window.resize(self.button.size())
+        self.conversation.hide()
         self.position_button()
+        self.window.show()
+
+    def _screen_area(self, position):
+        screen = QApplication.screenAt(position) or QApplication.primaryScreen()
+        return screen.availableGeometry() if screen is not None else None
+
+    def _button_position(self):
+        return self.button.mapToGlobal(self.button.rect().topLeft())
 
     def position_button(self):
-        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
-        if screen is None:
+        area = self._screen_area(QCursor.pos())
+        if area is None:
             return
-        area = screen.availableGeometry()
         margin = 18
-        self.button.move(
-            area.right() - self.button.width() - margin,
-            area.bottom() - self.button.height() - margin,
-        )
+        x = area.right() - self.button.width() - margin
+        y = area.bottom() - self.button.height() - margin
+        self.window.move(x, y)
+        self._button_global_position = self.window.pos()
+
+    def _drag_started(self, press_position):
+        if self.expanded:
+            self._collapse()
+        self._drag_offset = press_position - self._button_position()
+        self.docked_edge = None
+
+    def _dragged(self, current_position):
+        if self._drag_offset is None:
+            return
+        area = self._screen_area(current_position)
+        if area is None:
+            return
+        target = current_position - self._drag_offset
+        x = max(area.left(), min(target.x(), area.right() - self.button.width() + 1))
+        y = max(area.top(), min(target.y(), area.bottom() - self.button.height() + 1))
+        self.window.move(x, y)
+        self._button_global_position = self._button_position()
+
+    def _drag_finished(self, release_position):
+        if self._drag_offset is None:
+            return
+        area = self._screen_area(release_position)
+        if area is None:
+            self._drag_offset = None
+            return
+        position = self._button_position()
+        distances = {
+            "left": position.x() - area.left(),
+            "right": area.right() - position.x() - self.button.width() + 1,
+            "top": position.y() - area.top(),
+            "bottom": area.bottom() - position.y() - self.button.height() + 1,
+        }
+        edge, distance = min(distances.items(), key=lambda item: item[1])
+        if distance <= self.EDGE_SNAP_DISTANCE:
+            self._dock(edge, area)
+        else:
+            self.docked_edge = None
+            self._button_global_position = position
+        self._drag_offset = None
+
+    def _dock(self, edge, area):
+        self.docked_edge = edge
+        x, y = self.window.x(), self.window.y()
+        if edge == "left":
+            x = area.left() - self.button.width() + self.VISIBLE_EDGE_PORTION
+            y = max(area.top(), min(y, area.bottom() - self.button.height() + 1))
+        elif edge == "right":
+            x = area.right() - self.VISIBLE_EDGE_PORTION + 1
+            y = max(area.top(), min(y, area.bottom() - self.button.height() + 1))
+        elif edge == "top":
+            x = max(area.left(), min(x, area.right() - self.button.width() + 1))
+            y = area.top() - self.button.height() + self.VISIBLE_EDGE_PORTION
+        else:
+            x = max(area.left(), min(x, area.right() - self.button.width() + 1))
+            y = area.bottom() - self.VISIBLE_EDGE_PORTION + 1
+        self.window.move(x, y)
+        self._button_global_position = self._button_position()
+
+    def _expanded_geometry(self, button_position):
+        self.conversation.adjustSize()
+        panel_size = self.conversation.sizeHint()
+        button_size = self.button.size()
+        area = self._screen_area(button_position)
+        if area is None:
+            return None
+
+        if self.docked_edge == "left":
+            width = button_size.width() + panel_size.width()
+            height = max(button_size.height(), panel_size.height())
+            x, y = button_position.x(), button_position.y()
+            button_offset = (0, (height - button_size.height()) // 2)
+            panel_offset = (button_size.width(), (height - panel_size.height()) // 2)
+        elif self.docked_edge == "right":
+            width = button_size.width() + panel_size.width()
+            height = max(button_size.height(), panel_size.height())
+            x, y = button_position.x() - panel_size.width(), button_position.y()
+            button_offset = (panel_size.width(), (height - button_size.height()) // 2)
+            panel_offset = (0, (height - panel_size.height()) // 2)
+        elif self.docked_edge == "top":
+            width = max(button_size.width(), panel_size.width())
+            height = button_size.height() + panel_size.height()
+            x, y = button_position.x(), button_position.y()
+            button_offset = ((width - button_size.width()) // 2, 0)
+            panel_offset = ((width - panel_size.width()) // 2, button_size.height())
+        elif self.docked_edge == "bottom":
+            width = max(button_size.width(), panel_size.width())
+            height = button_size.height() + panel_size.height()
+            x, y = button_position.x(), button_position.y() - panel_size.height()
+            button_offset = ((width - button_size.width()) // 2, panel_size.height())
+            panel_offset = ((width - panel_size.width()) // 2, 0)
+        else:
+            width = panel_size.width()
+            height = panel_size.height() + button_size.height() + self.EXPANSION_GAP
+            x = button_position.x() + button_size.width() - width
+            y = button_position.y() - panel_size.height() - self.EXPANSION_GAP
+            if y < area.top():
+                y = button_position.y() + button_size.height() + self.EXPANSION_GAP
+            button_offset = (width - button_size.width(), panel_size.height() + self.EXPANSION_GAP)
+            panel_offset = (0, 0)
+
+        x = max(area.left(), min(x, area.right() - width + 1))
+        y = max(area.top(), min(y, area.bottom() - height + 1))
+        return x, y, width, height, panel_size, button_offset, panel_offset
+
+    def _collapse(self):
+        button_position = self._button_position()
+        edge = self.docked_edge
+        self.expanded = False
+        self.conversation.hide()
+        self.window.resize(self.button.size())
+        self.button.move(0, 0)
+        if edge is None:
+            self._button_global_position = button_position
+            self.window.move(button_position)
+        else:
+            area = self._screen_area(button_position)
+            if area is not None:
+                self.window.move(button_position)
+                self._dock(edge, area)
+        self.button.raise_()
 
     def toggle(self, checked=False):
-        if self.conversation.isVisible():
-            self.conversation.hide()
+        if self.expanded:
+            self._collapse()
         else:
             self.show()
 
     def show_button(self, checked=False):
-        self.position_button()
+        if self._button_global_position is None:
+            self.position_button()
+        self.window.show()
         self.button.show()
         self.button.raise_()
 
     def hide_button(self, checked=False):
-        self.button.hide()
+        if self.expanded:
+            self._collapse()
+        self.window.hide()
 
     def show(self, checked=False):
         self.show_button()
-        self.conversation.adjustSize()
-        button_position = self.button.pos()
-        x = button_position.x() + self.button.width() - self.conversation.width()
-        y = button_position.y() - self.conversation.height() - 8
-        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
-        if screen is not None:
-            area = screen.availableGeometry()
-            x = max(area.left(), min(x, area.right() - self.conversation.width()))
-            if y < area.top():
-                y = button_position.y() + self.button.height() + 8
-        self.conversation.move(x, y)
+        geometry = self._expanded_geometry(self._button_position())
+        if geometry is None:
+            return
+        x, y, width, height, panel_size, button_offset, panel_offset = geometry
+        self.window.resize(width, height)
+        self.window.move(x, y)
+        self.button.setGeometry(*button_offset, self.button.width(), self.button.height())
+        self.conversation.setGeometry(
+            *panel_offset, panel_size.width(), panel_size.height()
+        )
         self.conversation.show()
-        self.conversation.raise_()
-        self.conversation.activateWindow()
+        self.expanded = True
+        self.button.raise_()
+        self.window.raise_()
+        self.window.activateWindow()
         self.conversation.input.setFocus()
