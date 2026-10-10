@@ -8,6 +8,32 @@ Liam is a local-first Linux desktop assistant for Ollama, CachyOS, Hyprland, and
 python assistant.py
 ```
 
+Install optional tray interface with `uv venv .venv && uv pip install --python .venv/bin/python PySide6`, then run:
+
+```fish
+.venv/bin/python tray.py
+```
+
+Tray interface provides a small floating Liam button. Click it to open a compact
+chat window. The tray icon remains available for clearing the conversation,
+hiding or showing the floating button, and quitting.
+
+The button and chat window use always-on-top desktop hints and do not create a
+taskbar application entry. On Hyprland, use a `pin` window rule if the button
+must remain visible on every workspace:
+
+```ini
+windowrulev2 = pin, title:^(Liam)$
+```
+
+For Hyprland, launch `tray.py` with `exec-once`:
+
+```ini
+exec-once = python /path/to/liam/tray.py
+```
+
+Caelestia can launch Liam through the included desktop entry in `desktop/liam.desktop`.
+
 Ollama must be running locally with the configured model. Configuration can be
 overridden with `LIAM_MODEL` and `LIAM_OLLAMA_URL` environment variables.
 

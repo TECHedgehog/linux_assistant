@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Liam
+Comment=Local-first Linux desktop assistant
+Exec=/home/eric/Projects/liam/.venv/bin/python /home/eric/Projects/liam/tray.py
+Terminal=false
+Categories=Utility;
